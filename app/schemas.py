@@ -6,6 +6,7 @@ class AskRequest(BaseModel):
     """问答请求"""
     question: str
     top_k: int = 5
+    session_id: str = ""  # 非空时启用多轮记忆
 
 
 class SourceItem(BaseModel):

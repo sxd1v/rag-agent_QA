@@ -42,6 +42,11 @@ class ReActState:
     # 如果失败，原因是什么
     failed_reason: Optional[str] = None
 
+    # 异常处理：错误计数 + 熔断
+    error_count: int = 0       # 连续错误次数
+    max_errors: int = 3        # 连续几次后触发熔断
+    last_error: str = ""       # 最近一次错误信息
+
     # 思考-行动-观察 的完整历史
     history: list = field(default_factory=list)
 
@@ -56,4 +61,6 @@ class ReActState:
         self.final_answer = None
         self.done = False
         self.failed_reason = None
+        self.error_count = 0
+        self.last_error = ""
         self.history = []

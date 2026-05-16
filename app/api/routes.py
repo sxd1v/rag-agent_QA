@@ -2,6 +2,7 @@ from fastapi import APIRouter
 from app.schemas import AskRequest, AskResponse, AgentAskResponse, AgentHistoryItem, EvalRequest, EvalResponse
 from app.services.qa_service import answer_question
 from app.agent.react_loop import run_react_loop
+from app.agent.multi_agent import orchestrate
 from app.services.ragas_eval import evaluate
 
 router = APIRouter()
@@ -21,14 +22,25 @@ def ask(req: AskRequest):
 
 @router.post("/agent_ask", response_model=AgentAskResponse)
 def agent_ask(req: AskRequest):
-    """ReAct Agent 模式"""
-    result = run_react_loop(req.question)
+    """ReAct Agent 模式（支持多轮记忆，传入 session_id 即可）"""
+    result = run_react_loop(req.question, session_id=req.session_id)
     return AgentAskResponse(
         answer=result["answer"],
         retrieval_attempts=result["retrieval_attempts"],
         final_query=result["final_query"],
         history=[AgentHistoryItem(**h) for h in result["history"]],
     )
+
+
+@router.post("/multi_agent")
+def multi_agent_ask(req: AskRequest):
+    """Multi-Agent 模式：Researcher + Writer 协作"""
+    result = orchestrate(req.question)
+    return {
+        "answer": result["answer"],
+        "rounds": result["rounds"],
+        "confident": result["confident"],
+    }
 
 
 @router.post("/evaluate", response_model=EvalResponse)

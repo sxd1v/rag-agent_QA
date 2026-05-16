@@ -1,0 +1,47 @@
+[
+  {
+    "question": "什么是 RAG？",
+    "category": "定义类",
+    "faithfulness": 0.5,
+    "answer_relevancy": 0.5,
+    "context_precision": 0.6,
+    "keyword_score": 0.75,
+    "pass": true
+  },
+  {
+    "question": "RAG 的缺点有哪些？",
+    "category": "分析类",
+    "faithfulness": 0.5,
+    "answer_relevancy": 0.5,
+    "context_precision": 0.2,
+    "keyword_score": 0.75,
+    "pass": true
+  },
+  {
+    "question": "向量数据库有哪些选择？",
+    "category": "列举类",
+    "faithfulness": 0.5,
+    "answer_relevancy": 0.5,
+    "context_precision": 0.2,
+    "keyword_score": 1.0,
+    "pass": true
+  },
+  {
+    "question": "RAG 的核心流程是什么？",
+    "category": "流程类",
+    "faithfulness": 0.5,
+    "answer_relevancy": 0.5,
+    "context_precision": 0.4,
+    "keyword_score": 0.4,
+    "pass": true
+  },
+  {
+    "question": "Chroma 和 Milvus 有什么区别？",
+    "category": "对比类",
+    "faithfulness": 0.5,
+    "answer_relevancy": 0.5,
+    "context_precision": 0.2,
+    "keyword_score": 1.0,
+    "pass": true
+  }
+]

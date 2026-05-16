@@ -81,7 +81,7 @@ def context_precision_score(question: str, docs: list) -> float:
     for doc in docs:
         content = doc.page_content[:300] if hasattr(doc, "page_content") else str(doc)[:300]
         prompt = (
-            "判断以下文档内容是否与用户问题相关。只回答"是"或"否"。\n\n"
+            '判断以下文档内容是否与用户问题相关。只回答"是"或"否"。\n\n'
             f"【用户问题】{question}\n"
             f"【文档内容】{content}\n\n"
             "相关吗？（是/否）："
