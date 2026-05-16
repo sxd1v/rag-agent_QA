@@ -2,7 +2,7 @@
 
 基于 ReAct（Reasoning + Acting）模式的智能问答 Agent，融合 Advanced RAG 检索技术与 LLM 自主决策，让模型在回答问题时能够自主判断"搜什么、搜几次、何时结束"，而非走固定流程。
 
-**技术栈**：Python / FastAPI / LangChain / Chroma / SiliconFlow GLM-4.7 / MiniMax Embedding
+**技术栈**：Python / FastAPI / LangChain / Chroma 
 
 ---
 
