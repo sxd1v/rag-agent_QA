@@ -172,11 +172,4 @@ python test_hybrid_search.py    # 混合检索对比实验
 | RRF vs 直接拼接分数？ | RRF | 向量和 BM25 分数分布不可比 |
 | BM25 自实现 vs rank_bm25？ | 自实现 | 中文分词可控，展示算法理解 |
 
-## 待完成
 
-- [x] Rerank 集成（LLM-as-Reranker）
-- [x] RAGAs 评估集成（LLM-as-Judge）
-- [x] BM25 索引持久化
-- [ ] Redis 缓存
-- [ ] FastAPI 异步改造
-- [ ] 部署
