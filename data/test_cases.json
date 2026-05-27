@@ -1,32 +1,32 @@
 [
-  {
-    "question": "什么是 RAG？",
-    "expected_keywords": ["检索增强生成", "Retrieval-Augmented", "检索", "生成"],
-    "min_answer_len": 20,
-    "category": "定义类"
-  },
-  {
-    "question": "RAG 的缺点有哪些？",
-    "expected_keywords": ["召回", "上下文", "Context", "幻觉"],
-    "min_answer_len": 30,
-    "category": "分析类"
-  },
-  {
-    "question": "向量数据库有哪些选择？",
-    "expected_keywords": ["Chroma", "FAISS", "Milvus", "Qdrant"],
-    "min_answer_len": 20,
-    "category": "列举类"
-  },
-  {
-    "question": "RAG 的核心流程是什么？",
-    "expected_keywords": ["文档加载", "分块", "向量化", "检索", "生成"],
-    "min_answer_len": 30,
-    "category": "流程类"
-  },
-  {
-    "question": "Chroma 和 Milvus 有什么区别？",
-    "expected_keywords": ["轻量", "分布式", "生产", "Chroma", "Milvus"],
-    "min_answer_len": 20,
-    "category": "对比类"
-  }
+  {"question": "什么是 RAG？", "expected_keywords": ["检索", "生成"], "answerable": true, "category": "定义"},
+  {"question": "RAG 的英文全称是什么？", "expected_keywords": ["Retrieval-Augmented", "Generation"], "answerable": true, "category": "定义"},
+  {"question": "什么是 chunk？", "expected_keywords": ["文档", "分块"], "answerable": true, "category": "定义"},
+  {"question": "什么是 Hybrid Retrieval？", "expected_keywords": ["关键词", "向量"], "answerable": true, "category": "定义"},
+  {"question": "Query Rewrite 的作用是什么？", "expected_keywords": ["检索", "召回"], "answerable": true, "category": "定义"},
+  {"question": "RAG 的核心流程是什么？", "expected_keywords": ["文档加载", "检索"], "answerable": true, "category": "流程"},
+  {"question": "文档进入 RAG 知识库后要经历哪些步骤？", "expected_keywords": ["分块", "向量"], "answerable": true, "category": "流程"},
+  {"question": "用户提问后 RAG 如何生成答案？", "expected_keywords": ["检索", "生成"], "answerable": true, "category": "流程"},
+  {"question": "如何构建供 LLM 使用的 Context？", "expected_keywords": ["去重", "排序"], "answerable": true, "category": "流程"},
+  {"question": "生成阶段如何减少幻觉？", "expected_keywords": ["证据", "溯源"], "answerable": true, "category": "流程"},
+  {"question": "固定大小分块与语义分块有什么差异？", "expected_keywords": ["固定", "语义"], "answerable": true, "category": "对比"},
+  {"question": "Chroma 和 Milvus 的适用场景有什么区别？", "expected_keywords": ["Chroma", "Milvus"], "answerable": true, "category": "对比"},
+  {"question": "向量检索和 Hybrid Retrieval 有什么差异？", "expected_keywords": ["向量", "关键词"], "answerable": true, "category": "对比"},
+  {"question": "BGE 与 Sentence-Transformers 分别适合什么语言场景？", "expected_keywords": ["中文", "英文"], "answerable": true, "category": "对比"},
+  {"question": "FAISS 与 Qdrant 在资料中如何描述？", "expected_keywords": ["FAISS", "Qdrant"], "answerable": true, "category": "对比"},
+  {"question": "chunk size 和 overlap 推荐范围是多少，为什么需要 overlap？", "expected_keywords": ["300", "20"], "answerable": true, "category": "跨段信息"},
+  {"question": "选择 Embedding 模型需要考虑哪些因素？", "expected_keywords": ["语言", "速度"], "answerable": true, "category": "跨段信息"},
+  {"question": "如果一次检索不足以回答复杂问题，应采用什么能力？", "expected_keywords": ["Agent", "多步"], "answerable": true, "category": "跨段信息"},
+  {"question": "RAG 可能因为哪些检索和上下文因素失败？", "expected_keywords": ["召回", "Context"], "answerable": true, "category": "跨段信息"},
+  {"question": "知识库时效性为什么是 RAG 的限制？", "expected_keywords": ["过时", "更新"], "answerable": true, "category": "跨段信息"},
+  {"question": "资料是否给出了 Redis 的部署方式？", "expected_keywords": [], "answerable": false, "category": "无法回答"},
+  {"question": "资料中 MiniMax Embedding 的具体价格是多少？", "expected_keywords": [], "answerable": false, "category": "无法回答"},
+  {"question": "资料是否比较了 Chroma 和 Milvus 的基准吞吐量？", "expected_keywords": [], "answerable": false, "category": "无法回答"},
+  {"question": "RAG 在 2026 年的最新市场占有率是多少？", "expected_keywords": [], "answerable": false, "category": "无法回答"},
+  {"question": "文档中提供的生产环境 SLA 是多少？", "expected_keywords": [], "answerable": false, "category": "无法回答"},
+  {"question": "Rerank 在检索链路中有什么用途？", "expected_keywords": ["重排", "排序"], "answerable": true, "category": "定义"},
+  {"question": "术语标准化如何帮助 Query Rewrite？", "expected_keywords": ["口语", "标准"], "answerable": true, "category": "流程"},
+  {"question": "资料列举了哪些向量数据库？", "expected_keywords": ["Chroma", "Milvus"], "answerable": true, "category": "列举"},
+  {"question": "递归分块是如何工作的？", "expected_keywords": ["递归", "语义"], "answerable": true, "category": "流程"},
+  {"question": "RAG 为什么能让答案有据可查？", "expected_keywords": ["知识库", "检索"], "answerable": true, "category": "跨段信息"}
 ]

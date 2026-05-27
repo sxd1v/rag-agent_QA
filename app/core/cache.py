@@ -64,3 +64,17 @@ def clear():
             pass
     _memory_cache.clear()
     print("[Cache] 缓存已清空")
+
+
+def clear_prefix(prefix: str):
+    """仅清理给定命名空间，避免索引刷新影响 session 等无关数据。"""
+    if _redis_client:
+        try:
+            keys = list(_redis_client.scan_iter(match=f"{prefix}*"))
+            if keys:
+                _redis_client.delete(*keys)
+        except Exception:
+            pass
+    for key in list(_memory_cache):
+        if key.startswith(prefix):
+            _memory_cache.pop(key, None)

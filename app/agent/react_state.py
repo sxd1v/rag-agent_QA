@@ -35,6 +35,15 @@ class ReActState:
 
     # 最终答案
     final_answer: Optional[str] = None
+    final_citations: list[str] = field(default_factory=list)
+    abstained: bool = False
+
+    # 检索流程约束与可观测字段
+    retrieval_strategy: str = "enhanced"
+    retrieved_chunk_ids: set[str] = field(default_factory=set)
+    searched_queries: set[str] = field(default_factory=set)
+    no_progress_attempts: int = 0
+    max_steps: int = 8
 
     # 任务是否完成
     done: bool = False
@@ -50,7 +59,7 @@ class ReActState:
     # 思考-行动-观察 的完整历史
     history: list = field(default_factory=list)
 
-    def reset(self, question: str):
+    def reset(self, question: str, retrieval_strategy: str = "enhanced"):
         """初始化/重置 State"""
         self.user_question = question
         self.query = question
@@ -59,6 +68,12 @@ class ReActState:
         self.last_retrieval_result = []
         self.context = []
         self.final_answer = None
+        self.final_citations = []
+        self.abstained = False
+        self.retrieval_strategy = retrieval_strategy
+        self.retrieved_chunk_ids = set()
+        self.searched_queries = set()
+        self.no_progress_attempts = 0
         self.done = False
         self.failed_reason = None
         self.error_count = 0

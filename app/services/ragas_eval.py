@@ -8,6 +8,8 @@ RAGAs 四指标评估模块（轻量实现，LLM-as-Judge）
 - Context Recall：需要的文档都召回了没有（需 ground truth）
 """
 
+import json
+
 from app.core.llm_client import get_chat_llm
 
 
@@ -118,7 +120,7 @@ def context_recall_score(question: str, docs: list, ground_truth_docs: list = No
 
 def evaluate(question: str, answer: str, retrieved_docs: list, ground_truth_docs: list = None) -> dict:
     """
-    一站式评估，返回四指标分数。
+    一站式评估，单次 judge 调用返回三个生成质量指标，降低批量实验成本。
 
     返回格式：
     {
@@ -129,15 +131,87 @@ def evaluate(question: str, answer: str, retrieved_docs: list, ground_truth_docs
     }
     """
     context_text = "\n\n".join([
-        doc.page_content for doc in retrieved_docs
+        f"[{doc.metadata.get('chunk_id', 'unknown')}] {doc.page_content}"
+        for doc in retrieved_docs
     ]) if retrieved_docs else ""
 
+    if not answer or not context_text:
+        quality_scores = {
+            "faithfulness": 0.0,
+            "answer_relevancy": 0.0,
+            "context_precision": 0.0,
+        }
+    else:
+        prompt = (
+            "你是严格的 RAG 评估器。根据问题、答案和召回证据，一次性给出三个 0 到 1 的分数。\n"
+            "- faithfulness: 答案陈述是否都能被证据支持。\n"
+            "- answer_relevancy: 答案是否直接回答问题；证据不足时的明确拒答也可以相关。\n"
+            "- context_precision: 召回证据中与问题直接相关的比例。\n"
+            "只输出 JSON，不要解释，例如："
+            '{"faithfulness": 0.8, "answer_relevancy": 0.9, "context_precision": 0.6}\n\n'
+            f"【问题】\n{question}\n\n【答案】\n{answer}\n\n【召回证据】\n{context_text}"
+        )
+        llm = get_chat_llm()
+        response = llm.invoke(prompt)
+        text = response.content.strip() if hasattr(response, "content") else str(response).strip()
+        if text.startswith("```"):
+            text = "\n".join(text.split("\n")[1:-1])
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            payload = {}
+        quality_scores = {}
+        for name in ("faithfulness", "answer_relevancy", "context_precision"):
+            try:
+                quality_scores[name] = round(max(0.0, min(1.0, float(payload[name]))), 2)
+            except (KeyError, TypeError, ValueError):
+                quality_scores[name] = 0.0
+
     return {
-        "faithfulness": round(faithfulness_score(question, answer, context_text), 2),
-        "answer_relevancy": round(answer_relevancy_score(question, answer), 2),
-        "context_precision": round(context_precision_score(question, retrieved_docs), 2),
+        **quality_scores,
         "context_recall": (
             round(context_recall_score(question, retrieved_docs, ground_truth_docs), 2)
             if ground_truth_docs else "N/A（需要 ground truth）"
         ),
     }
+
+
+def evaluate_agent_behavior(
+    result: dict,
+    expected_answerable: bool | None = None,
+) -> dict:
+    """对可确定的 Agent 行为做非 LLM 评估。"""
+    history = result.get("history", [])
+    search_steps = [step for step in history if step.get("action") == "search_docs"]
+    queries = [step.get("query") for step in search_steps if step.get("query")]
+    retrieved_ids = {
+        chunk_id
+        for step in search_steps
+        for chunk_id in step.get("retrieved_chunk_ids", [])
+    }
+    citations = result.get("citations", [])
+    actions = [step.get("action") for step in history]
+    valid_actions = {"search_docs", "rewrite_query", "generate_answer"}
+    metrics = {
+        "action_count": len(history),
+        "search_count": len(search_steps),
+        "duplicate_query_count": len(queries) - len(set(queries)),
+        "no_progress_search_count": sum(
+            1 for step in search_steps if not step.get("new_chunk_ids", [])
+        ),
+        "citations_valid": set(citations).issubset(retrieved_ids),
+        "citation_count": len(citations),
+        "abstained": result.get("abstained", False),
+        "llm_calls": result.get("llm_calls", 0),
+        "valid_action_sequence": (
+            bool(actions)
+            and actions[0] == "search_docs"
+            and all(action in valid_actions for action in actions)
+            and (result.get("abstained", False) or "generate_answer" in actions)
+        ),
+    }
+    if expected_answerable is not None:
+        metrics["unable_to_answer_correct"] = (
+            result.get("abstained", False) is (not expected_answerable)
+        )
+    return metrics

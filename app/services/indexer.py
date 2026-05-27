@@ -1,3 +1,4 @@
+import hashlib
 from typing import List
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -24,9 +25,16 @@ def add_chunk_ids(docs: List[Document]) -> List[Document]:
     """
     给切分后的文档块补充 chunk_id，方便追踪和返回 sources。
     """
-    for i, doc in enumerate(docs):
+    for doc in docs:
         if "chunk_id" not in doc.metadata:
-            doc.metadata["chunk_id"] = f"chunk-{i}"
+            identity = "|".join([
+                str(doc.metadata.get("source", "")),
+                str(doc.metadata.get("page", "")),
+                doc.page_content,
+            ])
+            digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+            doc.metadata["chunk_id"] = f"chunk-{digest}"
+        doc.metadata.setdefault("type", "knowledge")
     return docs
 
 
@@ -39,5 +47,14 @@ def index_documents(docs: List[Document]) -> int:
     split_docs = split_documents(docs)
     split_docs = add_chunk_ids(split_docs)
 
-    vector_store.add_documents(split_docs)
+    vector_store.add_documents(
+        split_docs,
+        ids=[doc.metadata["chunk_id"] for doc in split_docs],
+    )
+    # BM25 持久化索引和检索缓存必须与新写入的向量库同步。
+    from app.services.hybrid_retriever import rebuild_bm25_index
+    from app.services.retriever import clear_retrieval_cache
+
+    rebuild_bm25_index()
+    clear_retrieval_cache()
     return len(split_docs)

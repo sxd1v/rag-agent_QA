@@ -70,3 +70,24 @@ def log_retry(action_name: str, attempt: int, error: str):
         "attempt": attempt,
         "error": str(error)[:200],
     }, ensure_ascii=False))
+
+
+def log_agent_trace(question: str, result: dict):
+    """记录一次 Agent 的动作、召回和最终引用，供回归与排障使用。"""
+    actions = []
+    for item in result.get("history", []):
+        actions.append({
+            "step": item.get("step"),
+            "action": item.get("action"),
+            "query": item.get("query"),
+            "retrieved_chunk_ids": item.get("retrieved_chunk_ids", []),
+            "new_chunk_ids": item.get("new_chunk_ids", []),
+        })
+    logger.info(json.dumps({
+        "event": "agent_trace",
+        "question": question[:100],
+        "retrieval_attempts": result.get("retrieval_attempts", 0),
+        "actions": actions,
+        "citations": result.get("citations", []),
+        "abstained": result.get("abstained", False),
+    }, ensure_ascii=False))

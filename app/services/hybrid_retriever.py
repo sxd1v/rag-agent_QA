@@ -36,6 +36,7 @@ class BM25:
     def __init__(self, corpus: List[Document]):
         self.doc_texts = [doc.page_content for doc in corpus]
         self.doc_ids = [doc.metadata.get("chunk_id", str(i)) for i, doc in enumerate(corpus)]
+        self.doc_metadatas = [doc.metadata for doc in corpus]
         # 手动分词（中文用 jieba）
         self.tokenized_corpus = [self._tokenize(text) for text in self.doc_texts]
         # 计算 IDF
@@ -157,41 +158,56 @@ def vector_search(query: str, top_k: int = 10) -> List[Tuple[Document, float]]:
 
 # 模块级别缓存（避免每次检索都重新建索引）
 _bm25_index: BM25 = None
+_bm25_cache_mtime: float | None = None
 
 
-def get_bm25_index() -> BM25:
-    """获取 BM25 索引（优先从缓存加载，缓存不存在则构建并持久化）"""
-    global _bm25_index
-    if _bm25_index is not None:
-        return _bm25_index
-
-    # 尝试从缓存加载
-    if os.path.exists(_BM25_CACHE_PATH):
-        try:
-            with open(_BM25_CACHE_PATH, "rb") as f:
-                _bm25_index = pickle.load(f)
-            print(f"[BM25] 从缓存加载，共 {len(_bm25_index.doc_texts)} 条文档")
-            return _bm25_index
-        except Exception:
-            print("[BM25] 缓存加载失败，重新构建")
-
-    # 从 Chroma 获取全部文档构建 BM25
+def _load_knowledge_documents() -> List[Document]:
     vector_store = get_vector_store()
     all_docs = vector_store.get(limit=10000, include=["documents", "metadatas"])
-    docs = [
+    return [
         Document(page_content=doc, metadata=meta or {})
         for doc, meta in zip(all_docs["documents"], all_docs["metadatas"])
     ]
+
+
+def rebuild_bm25_index() -> BM25:
+    """从当前向量库全量重建 BM25；导入完成后必须调用以保持一致。"""
+    global _bm25_index, _bm25_cache_mtime
+    docs = _load_knowledge_documents()
     _bm25_index = BM25(docs)
-    print(f"[BM25] 构建完成，共 {len(docs)} 条文档")
-
-    # 持久化到缓存
     os.makedirs(os.path.dirname(_BM25_CACHE_PATH), exist_ok=True)
-    with open(_BM25_CACHE_PATH, "wb") as f:
-        pickle.dump(_bm25_index, f)
-    print(f"[BM25] 已缓存到 {_BM25_CACHE_PATH}")
-
+    temp_path = f"{_BM25_CACHE_PATH}.tmp"
+    with open(temp_path, "wb") as f:
+        pickle.dump({"version": 2, "index": _bm25_index}, f)
+    os.replace(temp_path, _BM25_CACHE_PATH)
+    _bm25_cache_mtime = os.path.getmtime(_BM25_CACHE_PATH)
+    print(f"[BM25] 已重建并缓存，共 {len(docs)} 条文档")
     return _bm25_index
+
+
+def get_bm25_index() -> BM25:
+    """获取 BM25 索引；旧格式缓存会被主动重建。"""
+    global _bm25_index, _bm25_cache_mtime
+    current_mtime = (
+        os.path.getmtime(_BM25_CACHE_PATH)
+        if os.path.exists(_BM25_CACHE_PATH) else None
+    )
+    if _bm25_index is not None and current_mtime == _bm25_cache_mtime:
+        return _bm25_index
+
+    if os.path.exists(_BM25_CACHE_PATH):
+        try:
+            with open(_BM25_CACHE_PATH, "rb") as f:
+                cached = pickle.load(f)
+            if isinstance(cached, dict) and cached.get("version") == 2:
+                _bm25_index = cached["index"]
+                _bm25_cache_mtime = current_mtime
+                print(f"[BM25] 从缓存加载，共 {len(_bm25_index.doc_texts)} 条文档")
+                return _bm25_index
+            print("[BM25] 检测到旧版缓存，重新构建")
+        except Exception:
+            print("[BM25] 缓存加载失败，重新构建")
+    return rebuild_bm25_index()
 
 
 def bm25_search(query: str, top_k: int = 10) -> List[Tuple[Document, float]]:
@@ -199,7 +215,7 @@ def bm25_search(query: str, top_k: int = 10) -> List[Tuple[Document, float]]:
     bm25 = get_bm25_index()
     results = bm25.search(query, top_k=top_k)
     return [
-        (Document(page_content=bm25.doc_texts[i], metadata={"chunk_id": bm25.doc_ids[i]}), score)
+        (Document(page_content=bm25.doc_texts[i], metadata=bm25.doc_metadatas[i]), score)
         for i, score in results if score > 0
     ]
 
@@ -323,9 +339,9 @@ def hybrid_search(query: str, top_k: int = 5, num_queries: int = 3) -> List[Docu
         vector_results = vector_search(q, top_k=10)
         # BM25 检索 top-10
         bm25_results = bm25_search(q, top_k=10)
-        # 合并这两组结果（不做 RRF，每个 query 各自做一次融合）
-        # 或者直接 concat 交给上层的 RRF
-        all_results.append(vector_results + bm25_results)
+        # Each retriever is an independent ranked list. Concatenating them
+        # would incorrectly score the top BM25 hit as rank 11.
+        all_results.extend([vector_results, bm25_results])
 
     # RRF 融合所有 query 的结果
     fused = rrf_fusion(all_results, k=60)

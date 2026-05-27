@@ -1,7 +1,20 @@
 import hashlib
+import json
+
 from app.services.retriever import search_docs
 from app.core.llm_client import get_chat_llm
 from app.core.cache import get as cache_get, set as cache_set
+
+REFUSAL_ANSWER = "抱歉，当前知识库证据不足，无法可靠回答这个问题。"
+
+
+def document_source(doc) -> dict:
+    """将证据文档转换为可序列化的来源记录。"""
+    return {
+        "chunk_id": doc.metadata.get("chunk_id", "unknown"),
+        "source": doc.metadata.get("source"),
+        "content": doc.page_content,
+    }
 
 
 class SearchDocsTool:
@@ -10,7 +23,7 @@ class SearchDocsTool:
     name = "search_docs"
     description = "根据问题从知识库检索最相关的 top-k 文档块。返回检索结果列表，每个元素包含 chunk 内容和相关性信息。"
 
-    def execute(self, query: str, top_k: int = 5) -> dict:
+    def execute(self, query: str, top_k: int = 5, strategy: str = "enhanced") -> dict:
         """
         执行文档检索。
 
@@ -21,9 +34,10 @@ class SearchDocsTool:
             "docs": list[Document]  # 检索到的文档块
         }
         """
-        docs = search_docs(query, top_k=top_k)
+        docs = search_docs(query, top_k=top_k, strategy=strategy)
         return {
             "query": query,
+            "strategy": strategy,
             "count": len(docs),
             "docs": docs,
         }
@@ -102,8 +116,12 @@ class GenerateAnswerTool:
         """
         if not context:
             return {
-                "answer": "抱歉，知识库中没有找到足够的证据来回答这个问题。",
+                "answer": REFUSAL_ANSWER,
                 "source_count": 0,
+                "sources": [],
+                "citations": [],
+                "supported": False,
+                "abstained": True,
             }
 
         # 用 chunk_id 列表生成缓存 key（只比对证据是否相同，不比对完整文本）
@@ -111,32 +129,74 @@ class GenerateAnswerTool:
             doc.metadata.get("chunk_id", "") for doc in context
         ])
         key_raw = f"{question}|{'|'.join(chunk_ids)}"
-        cache_key = f"llm:answer:{hashlib.md5(key_raw.encode()).hexdigest()}"
+        cache_key = f"llm:answer:v2:{hashlib.md5(key_raw.encode()).hexdigest()}"
 
         cached = cache_get(cache_key)
         if cached is not None:
             return cached
 
-        # 构建 context 文本
-        context_text = "\n\n".join([doc.page_content for doc in context])
+        valid_docs = {
+            doc.metadata.get("chunk_id"): doc
+            for doc in context
+            if doc.metadata.get("chunk_id")
+        }
+        context_text = "\n\n".join(
+            f"[{chunk_id}] source={doc.metadata.get('source', 'unknown')}\n{doc.page_content}"
+            for chunk_id, doc in valid_docs.items()
+        )
 
         # 构建 prompt
         prompt = (
-            f"你是一个专业的问答助手。请根据以下参考资料回答用户问题。\n\n"
+            "你是一个严格的有据问答助手。只能使用以下证据回答，不能补充常识或猜测。\n\n"
             f"【参考资料】\n{context_text}\n\n"
             f"【用户问题】{question}\n\n"
-            f"请结合参考资料给出准确、完整的回答。如果资料不足以回答，请如实说明。"
+            "判断证据能否直接支撑答案。如果不能，supported 必须为 false。\n"
+            "若能回答，answer 中的事实陈述必须以 [chunk_id] 标注，citations 只能列出提供过的 chunk_id。\n"
+            "只输出 JSON："
+            '{"supported": true/false, "answer": "答案或空字符串", '
+            '"citations": ["chunk_id"], "missing": "证据不足时说明缺口"}'
         )
 
         # 调用 LLM
         llm = get_chat_llm()
-        answer = llm.invoke(prompt)
-        answer_text = answer.content if hasattr(answer, "content") else str(answer)
+        response = llm.invoke(prompt)
+        text = response.content if hasattr(response, "content") else str(response)
+        try:
+            text = text.strip()
+            if text.startswith("```"):
+                text = "\n".join(text.split("\n")[1:-1])
+            payload = json.loads(text)
+        except (TypeError, json.JSONDecodeError):
+            payload = {"supported": False, "citations": [], "missing": "生成结果无法验证"}
 
-        result = {
-            "answer": answer_text,
-            "source_count": len(context),
-        }
+        requested_citations = payload.get("citations", [])
+        citations = [
+            chunk_id for chunk_id in requested_citations
+            if chunk_id in valid_docs
+        ]
+        answer_text = str(payload.get("answer", "")).strip()
+        supported = bool(payload.get("supported")) and bool(answer_text) and bool(citations)
+        if not supported:
+            result = {
+                "answer": REFUSAL_ANSWER,
+                "source_count": 0,
+                "sources": [],
+                "citations": [],
+                "supported": False,
+                "abstained": True,
+                "missing": payload.get("missing", "没有可验证引用"),
+            }
+        else:
+            if not any(f"[{chunk_id}]" in answer_text for chunk_id in citations):
+                answer_text = f"{answer_text}\n\n引用：" + " ".join(f"[{chunk_id}]" for chunk_id in citations)
+            result = {
+                "answer": answer_text,
+                "source_count": len(citations),
+                "sources": [document_source(valid_docs[chunk_id]) for chunk_id in citations],
+                "citations": citations,
+                "supported": True,
+                "abstained": False,
+            }
 
         # 存入缓存
         cache_set(cache_key, result)

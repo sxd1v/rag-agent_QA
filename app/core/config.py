@@ -30,6 +30,8 @@ CHROMA_PERSIST_DIR = os.getenv(
     "CHROMA_PERSIST_DIR",
     os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "chroma_db")
 )
+KNOWLEDGE_COLLECTION_NAME = os.getenv("KNOWLEDGE_COLLECTION_NAME", "knowledge")
+MEMORY_COLLECTION_NAME = os.getenv("MEMORY_COLLECTION_NAME", "memory")
 
 # 默认 top_k
 DEFAULT_TOP_K = 5

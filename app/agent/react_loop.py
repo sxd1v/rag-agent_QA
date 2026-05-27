@@ -1,10 +1,9 @@
 import json
-import time as time_module
 from app.agent.react_state import ReActState
-from app.agent.tools import get_tool_by_name
-from app.core.llm_client import get_chat_llm
+from app.agent.tools import REFUSAL_ANSWER, document_source, get_tool_by_name
+from app.core.llm_client import get_chat_llm, get_llm_call_count, reset_llm_call_count
 from app.core.memory import get_history, build_history_summary, add_turn
-from app.core.logger import log_retry, log_circuit_breaker, logger
+from app.core.logger import log_agent_trace, log_retry, log_circuit_breaker
 
 
 # ============== LLM 决策相关 ==============
@@ -30,8 +29,8 @@ LLM_DECISION_PROMPT_TEMPLATE = """你是一个智能 Agent 决策器。根据当
 {remaining_attempts} 次（最多 {max_attempts} 次）
 
 【可用工具（只能选这三个）】
-- search_docs: 检索文档（参数：query, top_k）
-- rewrite_query: 改写查询后自动重新检索（参数：original_query）
+- search_docs: 检索文档（参数：query, top_k；系统会固定检索策略）
+- rewrite_query: 改写后续检索使用的查询（参数：original_query）
 - generate_answer: 基于已收集的证据生成最终答案
 
 【你的任务】
@@ -49,7 +48,7 @@ LLM_DECISION_PROMPT_TEMPLATE = """你是一个智能 Agent 决策器。根据当
   "action": "工具名",
   "args": {{"参数": "值"}}
 }}
-如果 action 是 search_docs 且检索后有可用的 chunk，可以在决策中加入 "keep_chunks": ["chunk_id_1", "chunk_id_2"] 来指定哪些 chunk 值得保留到 context。
+系统会记录召回 chunk 并对最终引用做校验；不要在证据不足时要求直接回答。
 """
 
 
@@ -177,16 +176,24 @@ def execute_tool(action_name: str, action_args: dict, state: ReActState) -> str:
         state.last_error = f"Unknown tool: {action_name}"
         return f"Error: 未知工具 '{action_name}'"
 
-    if action_name == "generate_answer":
-        action_args["context"] = state.context
-        action_args["question"] = state.user_question
+    tool_args = dict(action_args)
+    if action_name == "search_docs":
+        tool_args = {
+            "query": action_args.get("query", state.query),
+            "top_k": action_args.get("top_k", 3),
+            "strategy": state.retrieval_strategy,
+        }
+    elif action_name == "rewrite_query":
+        tool_args = {"original_query": action_args.get("original_query", state.query)}
+    elif action_name == "generate_answer":
+        tool_args = {"context": state.context, "question": state.user_question}
 
     # 工具层重试：最多3次，指数退避
     result = None
     last_exception = None
     for attempt in range(3):
         try:
-            result = tool.execute(**action_args)
+            result = tool.execute(**tool_args)
             break  # 成功，跳出重试循环
         except Exception as e:
             last_exception = e
@@ -209,28 +216,42 @@ def execute_tool(action_name: str, action_args: dict, state: ReActState) -> str:
     if action_name == "search_docs":
         state.last_retrieval_result = result["docs"]
         state.retrieval_attempts += 1
+        returned_ids = [
+            doc.metadata.get("chunk_id", "unknown") for doc in result["docs"]
+        ]
+        new_ids = [
+            chunk_id for chunk_id in returned_ids
+            if chunk_id not in state.retrieved_chunk_ids
+        ]
+        repeated_query = result["query"] in state.searched_queries
+        state.searched_queries.add(result["query"])
+        state.retrieved_chunk_ids.update(returned_ids)
+        if repeated_query or not new_ids:
+            state.no_progress_attempts += 1
+        else:
+            state.no_progress_attempts = 0
 
         # 记录检索历史（用于 LLM 决策参考）
         state.retrieval_history.append({
             "query": result["query"],
             "count": result["count"],
             "docs": result["docs"],
+            "retrieved_chunk_ids": returned_ids,
+            "new_chunk_ids": new_ids,
         })
 
-        # 按 LLM 决策添加 context（而非全部自动添加）
+        # 将召回结果纳入证据池；是否足以回答由有引用校验的生成步骤决定。
         if result["docs"]:
-            if action_args.get("keep_chunks"):
-                # LLM 指定了要保留的 chunk
-                kept = [d for d in result["docs"] if d.metadata.get("chunk_id") in action_args["keep_chunks"]]
-                state.context.extend(kept)
-            # 如果 LLM 没指定 keep_chunks，不自动添加（等 LLM 下一轮决定）
-            state.context = deduplicate_context(state.context)
+            state.context.extend(result["docs"])
+            state.context = deduplicate_context(state.context)[:8]
 
     elif action_name == "rewrite_query":
         state.query = result["rewritten_query"]
 
     elif action_name == "generate_answer":
         state.final_answer = result["answer"]
+        state.final_citations = result.get("citations", [])
+        state.abstained = result.get("abstained", False)
         state.done = True
 
     # 构造 Observation 描述
@@ -269,13 +290,25 @@ def deduplicate_context(context: list) -> list:
 
 def should_finish(state: ReActState) -> bool:
     """判断任务是否应该结束——含三层保护"""
-    # 保护1：检索次数耗尽
-    if state.retrieval_attempts >= state.max_retrieval_attempts and not state.done:
+    # 保护1：检索次数耗尽，或某轮没有带来新证据。
+    exhausted = state.retrieval_attempts >= state.max_retrieval_attempts
+    stalled = state.no_progress_attempts >= 1 and state.retrieval_attempts > 1
+    too_many_steps = len(state.history) >= state.max_steps
+    if (exhausted or stalled or too_many_steps) and not state.done:
         if state.context:
-            state.final_answer = "（系统兜底：检索次数已用完，使用已有证据生成答案）"
+            observation = execute_tool("generate_answer", {}, state)
+            reason = "检索无新增证据" if stalled else "流程约束触发"
+            state.history.append({
+                "step": len(state.history) + 1,
+                "thought": f"【系统收敛】{reason}，仅基于现有证据生成或拒答。",
+                "action": "generate_answer",
+                "action_args": {},
+                "observation": observation,
+            })
         else:
-            state.final_answer = "抱歉，经过多次检索仍未找到足够的证据来回答这个问题。"
-        state.done = True
+            state.final_answer = REFUSAL_ANSWER
+            state.abstained = True
+            state.done = True
 
     # 保护2：熔断——连续错误超过阈值
     if state.error_count >= state.max_errors and not state.done:
@@ -285,6 +318,24 @@ def should_finish(state: ReActState) -> bool:
         log_circuit_breaker(state.error_count, state.last_error)
 
     return state.done
+
+
+def _build_result(state: ReActState) -> dict:
+    cited_docs = [
+        doc for doc in state.context
+        if doc.metadata.get("chunk_id") in state.final_citations
+    ]
+    return {
+        "answer": state.final_answer,
+        "history": state.history,
+        "retrieval_attempts": state.retrieval_attempts,
+        "final_query": state.query,
+        "sources": [document_source(doc) for doc in cited_docs],
+        "citations": state.final_citations,
+        "abstained": state.abstained,
+        "context": state.context,
+        "llm_calls": get_llm_call_count(),
+    }
 
 
 def _resolve_references(question: str, chat_history: str) -> str:
@@ -322,7 +373,11 @@ def _resolve_references(question: str, chat_history: str) -> str:
     return question
 
 
-def run_react_loop(question: str, session_id: str = "") -> dict:
+def run_react_loop(
+    question: str,
+    session_id: str = "",
+    retrieval_strategy: str = "enhanced",
+) -> dict:
     """
     运行 ReAct Loop（带记忆），返回最终结果。
 
@@ -337,6 +392,7 @@ def run_react_loop(question: str, session_id: str = "") -> dict:
     }
     """
     # 加载聊天历史
+    reset_llm_call_count()
     chat_history = ""
     if session_id:
         history = get_history(session_id)
@@ -353,17 +409,12 @@ def run_react_loop(question: str, session_id: str = "") -> dict:
 
     # 初始化 State
     state = ReActState()
-    state.reset(question)
+    state.reset(question, retrieval_strategy=retrieval_strategy)
 
     # 第一次检索：固定用 search_docs（首次必须先有检索结果，LLM 才能决策）
     first_action_name = "search_docs"
     first_action_args = {"query": state.query, "top_k": 3}
     first_observation = execute_tool(first_action_name, first_action_args, state)
-
-    # 首次检索启动特权：全部加入 context（后续检索由 LLM 通过 keep_chunks 筛选）
-    if state.last_retrieval_result:
-        state.context.extend(state.last_retrieval_result)
-        state.context = deduplicate_context(state.context)
 
     state.history.append({
         "step": 1,
@@ -371,18 +422,18 @@ def run_react_loop(question: str, session_id: str = "") -> dict:
         "action": first_action_name,
         "action_args": first_action_args,
         "observation": first_observation,
+        "query": state.query,
+        "retrieved_chunk_ids": state.retrieval_history[-1]["retrieved_chunk_ids"] if state.retrieval_history else [],
+        "new_chunk_ids": state.retrieval_history[-1]["new_chunk_ids"] if state.retrieval_history else [],
     })
 
     # 检查是否直接结束（首次检索无结果）
     if should_finish(state):
         if session_id:
             add_turn(session_id, question, state.final_answer)
-        return {
-            "answer": state.final_answer,
-            "history": state.history,
-            "retrieval_attempts": state.retrieval_attempts,
-            "final_query": state.query,
-        }
+        result = _build_result(state)
+        log_agent_trace(question, result)
+        return result
 
     # 主循环：LLM 决策后续行动
     while not state.done:
@@ -404,6 +455,15 @@ def run_react_loop(question: str, session_id: str = "") -> dict:
             "action": action_name,
             "action_args": action_args,
             "observation": observation,
+            "query": state.retrieval_history[-1]["query"] if action_name == "search_docs" else None,
+            "retrieved_chunk_ids": (
+                state.retrieval_history[-1]["retrieved_chunk_ids"]
+                if action_name == "search_docs" else []
+            ),
+            "new_chunk_ids": (
+                state.retrieval_history[-1]["new_chunk_ids"]
+                if action_name == "search_docs" else []
+            ),
         })
 
         # 5. 检查是否完成
@@ -414,9 +474,6 @@ def run_react_loop(question: str, session_id: str = "") -> dict:
     if session_id:
         add_turn(session_id, question, state.final_answer)
 
-    return {
-        "answer": state.final_answer,
-        "history": state.history,
-        "retrieval_attempts": state.retrieval_attempts,
-        "final_query": state.query,
-    }
+    result = _build_result(state)
+    log_agent_trace(question, result)
+    return result

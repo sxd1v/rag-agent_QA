@@ -1,11 +1,6 @@
 from app.schemas import AskResponse, RetrieveDebugResponse, SourceItem
 from app.services.retriever import search_docs
-from app.core.llm_client import get_chat_llm
-
-
-def build_context(docs):
-    return "\n\n".join([doc.page_content for doc in docs])
-
+from app.agent.tools import GenerateAnswerTool
 
 def format_sources(docs):
     sources = []
@@ -20,32 +15,25 @@ def format_sources(docs):
     return sources
 
 
-def answer_question(question: str, top_k: int = 3) -> AskResponse:
+def answer_question(
+    question: str,
+    top_k: int = 3,
+    retrieval_strategy: str = "hybrid",
+) -> AskResponse:
     """普通 RAG 模式：检索 → 构建上下文 → LLM 生成答案"""
-    docs = search_docs(question, top_k=top_k)
-    context = build_context(docs)
-
-    if not docs:
-        answer = "抱歉，知识库中没有找到相关的内容来回答这个问题。"
-    else:
-        prompt = (
-            f"你是一个专业的问答助手。请根据以下参考资料回答用户问题。\n\n"
-            f"【参考资料】\n{context}\n\n"
-            f"【用户问题】{question}\n\n"
-            f"请结合参考资料给出准确、完整的回答。如果资料不足以回答，请如实说明。"
-        )
-        llm = get_chat_llm()
-        response = llm.invoke(prompt)
-        answer = response.content if hasattr(response, "content") else str(response)
+    docs = search_docs(question, top_k=top_k, strategy=retrieval_strategy)
+    result = GenerateAnswerTool().execute(question, docs)
 
     return AskResponse(
-        answer=answer,
-        sources=format_sources(docs),
+        answer=result["answer"],
+        sources=[SourceItem(**source) for source in result.get("sources", [])],
+        citations=result.get("citations", []),
+        abstained=result.get("abstained", False),
     )
 
 
-def retrieve_only(question: str, top_k: int = 3) -> RetrieveDebugResponse:
-    docs = search_docs(question, top_k=top_k)
+def retrieve_only(question: str, top_k: int = 3, retrieval_strategy: str = "hybrid") -> RetrieveDebugResponse:
+    docs = search_docs(question, top_k=top_k, strategy=retrieval_strategy)
     return RetrieveDebugResponse(
         docs=format_sources(docs)
     )

@@ -81,12 +81,22 @@ def orchestrate(question: str) -> dict:
         # 3. 自信或最后一轮 → 返回
         if result["confident"] or round_num >= 3:
             return {
-                "answer": result["answer"] or "抱歉，未能在知识库中找到足够的证据来回答这个问题。",
+                "answer": result["answer"],
                 "rounds": round_num,
                 "confident": result["confident"],
+                "citations": result.get("citations", []),
+                "sources": result.get("sources", []),
+                "abstained": result.get("abstained", not result["confident"]),
             }
 
         # 4. 不自信：把需求退回 Researcher
         extra_hint = result["missing"]
 
-    return {"answer": "抱歉，无法回答。", "rounds": 3, "confident": False}
+    return {
+        "answer": "抱歉，当前知识库证据不足，无法可靠回答这个问题。",
+        "rounds": 3,
+        "confident": False,
+        "citations": [],
+        "sources": [],
+        "abstained": True,
+    }
