@@ -5,3 +5,4 @@ __pycache__/
 data/chroma_db/
 data/bm25_index.pkl
 data/eval_report_*.json
+data/agent_*.txt
