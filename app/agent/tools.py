@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 
 from app.services.retriever import search_docs
 from app.core.llm_client import get_chat_llm
@@ -23,7 +24,13 @@ class SearchDocsTool:
     name = "search_docs"
     description = "根据问题从知识库检索最相关的 top-k 文档块。返回检索结果列表，每个元素包含 chunk 内容和相关性信息。"
 
-    def execute(self, query: str, top_k: int = 5, strategy: str = "enhanced") -> dict:
+    def execute(
+        self,
+        query: str,
+        top_k: int = 5,
+        strategy: str = "enhanced",
+        enable_rerank: bool | None = None,
+    ) -> dict:
         """
         执行文档检索。
 
@@ -34,10 +41,16 @@ class SearchDocsTool:
             "docs": list[Document]  # 检索到的文档块
         }
         """
-        docs = search_docs(query, top_k=top_k, strategy=strategy)
+        docs = search_docs(
+            query,
+            top_k=top_k,
+            strategy=strategy,
+            enable_rerank=enable_rerank,
+        )
         return {
             "query": query,
             "strategy": strategy,
+            "enable_rerank": enable_rerank,
             "count": len(docs),
             "docs": docs,
         }
@@ -108,6 +121,35 @@ class GenerateAnswerTool:
     name = "generate_answer"
     description = "基于收集到的证据块和问题生成最终答案。答案必须有证据支撑。"
 
+    def _parse_payload(self, text: str) -> dict:
+        text = text.strip()
+        if text.startswith("```"):
+            text = "\n".join(text.split("\n")[1:-1]).strip()
+        try:
+            return json.loads(text)
+        except (TypeError, json.JSONDecodeError):
+            match = re.search(r"\{.*\}", text, flags=re.S)
+            if match:
+                return json.loads(match.group(0))
+            raise
+
+    def _valid_citations(self, payload: dict, answer_text: str, valid_docs: dict) -> list[str]:
+        raw = payload.get("citations", [])
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list):
+            raw = []
+        from_payload = [chunk_id for chunk_id in raw if chunk_id in valid_docs]
+        from_answer = [
+            chunk_id for chunk_id in re.findall(r"\[(chunk-[a-f0-9]+)\]", answer_text)
+            if chunk_id in valid_docs
+        ]
+        citations = []
+        for chunk_id in from_payload + from_answer:
+            if chunk_id not in citations:
+                citations.append(chunk_id)
+        return citations
+
     def execute(self, question: str, context: list) -> dict:
         """
         生成答案（LLM + 缓存）。
@@ -129,7 +171,7 @@ class GenerateAnswerTool:
             doc.metadata.get("chunk_id", "") for doc in context
         ])
         key_raw = f"{question}|{'|'.join(chunk_ids)}"
-        cache_key = f"llm:answer:v2:{hashlib.md5(key_raw.encode()).hexdigest()}"
+        cache_key = f"llm:answer:v6:{hashlib.md5(key_raw.encode()).hexdigest()}"
 
         cached = cache_get(cache_key)
         if cached is not None:
@@ -145,37 +187,62 @@ class GenerateAnswerTool:
             for chunk_id, doc in valid_docs.items()
         )
 
+        valid_chunk_ids = list(valid_docs)
+
         # 构建 prompt
         prompt = (
             "你是一个严格的有据问答助手。只能使用以下证据回答，不能补充常识或猜测。\n\n"
             f"【参考资料】\n{context_text}\n\n"
             f"【用户问题】{question}\n\n"
+            f"【允许引用的 chunk_id】{valid_chunk_ids}\n\n"
             "判断证据能否直接支撑答案。如果不能，supported 必须为 false。\n"
-            "若能回答，answer 中的事实陈述必须以 [chunk_id] 标注，citations 只能列出提供过的 chunk_id。\n"
+            "若能回答，answer 中的事实陈述必须以 [chunk_id] 标注，citations 只能列出允许引用的 chunk_id。\n"
+            "只要证据中有直接相关信息，就应基于证据简洁回答，不要因为表述不完全相同而拒答。\n"
+            "回答必须直接回应用户问题中的核心术语和比较维度；如果问题问“是什么/用途/区别/为什么/如何”，答案要显式覆盖这些问法。\n"
+            "定义类问题不要只给一句同义改写，应说明它在 RAG 链路中的位置、工作方式或用途。\n"
+            "对于列举或对比问题，使用分号或短列表列出证据中的所有相关项，不要只回答其中一项。\n"
+            "优先复用证据中的原文短语和描述，不要改写成更宽泛的说法。\n"
+            "每个列表项或分号分隔的事实都要单独标注 [chunk_id]，不要只在整段末尾放一个引用。\n"
+            "如果问题问“分别是哪两个例子/有哪些方式/如何组合”，答案要逐项给出，不要概括成一句。\n"
+            "尽量保留证据或问题中的关键术语原文，例如：召回、Context、top-k、Hybrid Retrieval、Rerank、Query Rewrite。\n"
+            "不要添加证据中没有直接出现的效果外推；例如证据只说 Rerank 优化排序时，不要扩展成提升生成质量或提升准确率。\n"
             "只输出 JSON："
             '{"supported": true/false, "answer": "答案或空字符串", '
             '"citations": ["chunk_id"], "missing": "证据不足时说明缺口"}'
         )
 
-        # 调用 LLM
+        payload = {}
+        answer_text = ""
+        citations = []
+        supported = False
+        missing = "生成结果无法验证"
         llm = get_chat_llm()
-        response = llm.invoke(prompt)
-        text = response.content if hasattr(response, "content") else str(response)
-        try:
-            text = text.strip()
-            if text.startswith("```"):
-                text = "\n".join(text.split("\n")[1:-1])
-            payload = json.loads(text)
-        except (TypeError, json.JSONDecodeError):
-            payload = {"supported": False, "citations": [], "missing": "生成结果无法验证"}
+        for attempt in range(2):
+            response = llm.invoke(prompt)
+            text = response.content if hasattr(response, "content") else str(response)
+            try:
+                payload = self._parse_payload(text)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                payload = {"supported": False, "citations": [], "missing": "生成结果无法解析"}
 
-        requested_citations = payload.get("citations", [])
-        citations = [
-            chunk_id for chunk_id in requested_citations
-            if chunk_id in valid_docs
-        ]
-        answer_text = str(payload.get("answer", "")).strip()
-        supported = bool(payload.get("supported")) and bool(answer_text) and bool(citations)
+            answer_text = str(payload.get("answer", "")).strip()
+            citations = self._valid_citations(payload, answer_text, valid_docs)
+            supported = bool(payload.get("supported")) and bool(answer_text) and bool(citations)
+            missing = payload.get("missing", "没有可验证引用")
+            if supported:
+                break
+            if attempt == 0:
+                prompt = (
+                    "上一次输出无法通过证据校验。请重新检查证据并修复 JSON。\n"
+                    "如果证据能回答，必须使用允许引用的 chunk_id；如果不能回答，仍输出 supported=false。\n\n"
+                    f"【允许引用的 chunk_id】{valid_chunk_ids}\n\n"
+                    f"【参考资料】\n{context_text}\n\n"
+                    f"【用户问题】{question}\n\n"
+                    "回答必须直接覆盖用户问题中的核心术语和比较维度；定义类问题要说明位置、工作方式或用途；列举/对比/组合题逐项回答；优先复用证据原文短语；保留召回、Context、top-k、Rerank 等关键术语；不要添加证据外推，并在每个事实后标注 chunk_id。\n"
+                    "只输出 JSON："
+                    '{"supported": true/false, "answer": "答案或空字符串", '
+                    '"citations": ["chunk_id"], "missing": "证据不足时说明缺口"}'
+                )
         if not supported:
             result = {
                 "answer": REFUSAL_ANSWER,
@@ -184,7 +251,7 @@ class GenerateAnswerTool:
                 "citations": [],
                 "supported": False,
                 "abstained": True,
-                "missing": payload.get("missing", "没有可验证引用"),
+                "missing": missing,
             }
         else:
             if not any(f"[{chunk_id}]" in answer_text for chunk_id in citations):

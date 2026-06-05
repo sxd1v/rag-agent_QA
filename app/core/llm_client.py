@@ -2,7 +2,7 @@
 from contextvars import ContextVar
 
 from langchain_openai import ChatOpenAI
-from app.core.config import SILICONFLOW_API_KEY
+from app.core.config import CHAT_API_KEY, CHAT_BASE_URL, CHAT_MODEL, CHAT_PROVIDER, CHAT_TEMPERATURE
 
 _llm_call_count: ContextVar[int] = ContextVar("llm_call_count", default=0)
 
@@ -30,10 +30,15 @@ def get_llm_call_count() -> int:
 
 
 def get_chat_llm():
-    """获取 SiliconFlow Chat LLM 实例（OpenAI 兼容）"""
+    """获取 OpenAI-compatible Chat LLM 实例。"""
+    if CHAT_PROVIDER.lower() not in {"openai", "openai-compatible", "siliconflow"}:
+        raise ValueError(f"Unsupported CHAT_PROVIDER: {CHAT_PROVIDER}")
+    if not CHAT_API_KEY:
+        raise ValueError("CHAT_API_KEY is required for chat model calls")
+
     return CountingChatModel(ChatOpenAI(
-        model="Pro/zai-org/GLM-4.7",
-        api_key=SILICONFLOW_API_KEY,
-        base_url="https://api.siliconflow.cn/v1",
-        temperature=0.7,
+        model=CHAT_MODEL,
+        api_key=CHAT_API_KEY,
+        base_url=CHAT_BASE_URL,
+        temperature=CHAT_TEMPERATURE,
     ))

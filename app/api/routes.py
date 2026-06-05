@@ -10,6 +10,7 @@ from app.schemas import (
 )
 from starlette.concurrency import run_in_threadpool
 
+from app.core.config import AGENT_MAX_LLM_CALLS, AGENT_TIMEOUT_SECONDS
 from app.services.qa_service import answer_question, retrieve_only
 from app.agent.react_loop import run_react_loop
 from app.agent.multi_agent import orchestrate
@@ -27,7 +28,13 @@ def health():
 async def ask(req: AskRequest):
     """普通 RAG 模式（固定流程，非 Agent）"""
     strategy = req.retrieval_strategy or "hybrid"
-    result = await run_in_threadpool(answer_question, req.question, req.top_k, strategy)
+    result = await run_in_threadpool(
+        answer_question,
+        req.question,
+        req.top_k,
+        strategy,
+        req.enable_rerank,
+    )
     return result
 
 
@@ -35,7 +42,15 @@ async def ask(req: AskRequest):
 async def agent_ask(req: AskRequest):
     """ReAct Agent 模式（支持多轮记忆，传入 session_id 即可）"""
     strategy = req.retrieval_strategy or "enhanced"
-    result = await run_in_threadpool(run_react_loop, req.question, req.session_id, strategy)
+    result = await run_in_threadpool(
+        run_react_loop,
+        req.question,
+        req.session_id,
+        strategy,
+        req.enable_rerank,
+        req.max_llm_calls or AGENT_MAX_LLM_CALLS,
+        req.timeout_seconds or AGENT_TIMEOUT_SECONDS,
+    )
     return AgentAskResponse(
         answer=result["answer"],
         retrieval_attempts=result["retrieval_attempts"],
@@ -65,7 +80,13 @@ async def multi_agent_ask(req: AskRequest):
 @router.post("/retrieve_debug", response_model=RetrieveDebugResponse)
 async def retrieve_debug_endpoint(req: AskRequest):
     strategy = req.retrieval_strategy or "hybrid"
-    return await run_in_threadpool(retrieve_only, req.question, req.top_k, strategy)
+    return await run_in_threadpool(
+        retrieve_only,
+        req.question,
+        req.top_k,
+        strategy,
+        req.enable_rerank,
+    )
 
 
 @router.post("/evaluate", response_model=EvalResponse)

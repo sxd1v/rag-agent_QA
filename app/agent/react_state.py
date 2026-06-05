@@ -40,10 +40,15 @@ class ReActState:
 
     # 检索流程约束与可观测字段
     retrieval_strategy: str = "enhanced"
+    enable_rerank: bool | None = None
     retrieved_chunk_ids: set[str] = field(default_factory=set)
     searched_queries: set[str] = field(default_factory=set)
     no_progress_attempts: int = 0
     max_steps: int = 8
+    max_llm_calls: int = 6
+    timeout_seconds: float = 120.0
+    started_at: float = 0.0
+    routed_to: Optional[str] = None
 
     # 任务是否完成
     done: bool = False
@@ -59,8 +64,17 @@ class ReActState:
     # 思考-行动-观察 的完整历史
     history: list = field(default_factory=list)
 
-    def reset(self, question: str, retrieval_strategy: str = "enhanced"):
+    def reset(
+        self,
+        question: str,
+        retrieval_strategy: str = "enhanced",
+        enable_rerank: bool | None = None,
+        max_llm_calls: int = 6,
+        timeout_seconds: float = 120.0,
+    ):
         """初始化/重置 State"""
+        import time
+
         self.user_question = question
         self.query = question
         self.retrieval_attempts = 0
@@ -71,9 +85,14 @@ class ReActState:
         self.final_citations = []
         self.abstained = False
         self.retrieval_strategy = retrieval_strategy
+        self.enable_rerank = enable_rerank
         self.retrieved_chunk_ids = set()
         self.searched_queries = set()
         self.no_progress_attempts = 0
+        self.max_llm_calls = max_llm_calls
+        self.timeout_seconds = timeout_seconds
+        self.started_at = time.perf_counter()
+        self.routed_to = None
         self.done = False
         self.failed_reason = None
         self.error_count = 0

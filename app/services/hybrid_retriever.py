@@ -15,6 +15,7 @@ from typing import List, Tuple
 from langchain_core.documents import Document
 
 from app.db.vector_store import get_vector_store
+from app.core.config import ENABLE_RERANK
 from app.core.llm_client import get_chat_llm
 
 # BM25 索引持久化路径
@@ -315,7 +316,12 @@ def rerank_documents(
 
 # ============== 顶层接口 ==============
 
-def hybrid_search(query: str, top_k: int = 5, num_queries: int = 3) -> List[Document]:
+def hybrid_search(
+    query: str,
+    top_k: int = 5,
+    num_queries: int = 3,
+    enable_rerank: bool | None = None,
+) -> List[Document]:
     """
     完整的两阶段检索流程。
 
@@ -349,9 +355,14 @@ def hybrid_search(query: str, top_k: int = 5, num_queries: int = 3) -> List[Docu
     candidates = [doc for doc, _ in fused[: top_k * 2]]
     print(f"[RRF 融合] 候选文档数: {len(candidates)}")
 
-    # Step 3: Rerank 精排
-    final_docs = rerank_documents(query, candidates, top_k=top_k)
-    print(f"[Rerank] 最终输出: {len(final_docs)} 个文档")
+    # Step 3: Rerank 精排，可按成本预算关闭。
+    use_rerank = ENABLE_RERANK if enable_rerank is None else enable_rerank
+    if use_rerank:
+        final_docs = rerank_documents(query, candidates, top_k=top_k)
+        print(f"[Rerank] 最终输出: {len(final_docs)} 个文档")
+    else:
+        final_docs = candidates[:top_k]
+        print(f"[Rerank] 已关闭，返回 RRF 前 {len(final_docs)} 个文档")
 
     return final_docs
 

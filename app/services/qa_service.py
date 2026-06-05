@@ -19,9 +19,15 @@ def answer_question(
     question: str,
     top_k: int = 3,
     retrieval_strategy: str = "hybrid",
+    enable_rerank: bool | None = None,
 ) -> AskResponse:
     """普通 RAG 模式：检索 → 构建上下文 → LLM 生成答案"""
-    docs = search_docs(question, top_k=top_k, strategy=retrieval_strategy)
+    docs = search_docs(
+        question,
+        top_k=top_k,
+        strategy=retrieval_strategy,
+        enable_rerank=enable_rerank,
+    )
     result = GenerateAnswerTool().execute(question, docs)
 
     return AskResponse(
@@ -32,8 +38,18 @@ def answer_question(
     )
 
 
-def retrieve_only(question: str, top_k: int = 3, retrieval_strategy: str = "hybrid") -> RetrieveDebugResponse:
-    docs = search_docs(question, top_k=top_k, strategy=retrieval_strategy)
+def retrieve_only(
+    question: str,
+    top_k: int = 3,
+    retrieval_strategy: str = "hybrid",
+    enable_rerank: bool | None = None,
+) -> RetrieveDebugResponse:
+    docs = search_docs(
+        question,
+        top_k=top_k,
+        strategy=retrieval_strategy,
+        enable_rerank=enable_rerank,
+    )
     return RetrieveDebugResponse(
         docs=format_sources(docs)
     )

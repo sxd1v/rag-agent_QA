@@ -11,7 +11,12 @@ def clear_retrieval_cache():
     clear_prefix("retrieval:")
 
 
-def search_docs(query: str, top_k: int = 5, strategy: str = "hybrid") -> list:
+def search_docs(
+    query: str,
+    top_k: int = 5,
+    strategy: str = "hybrid",
+    enable_rerank: bool | None = None,
+) -> list:
     """
     混合检索（Redis缓存 + 线程池并行）：向量 + BM25 同时发起 → RRF 融合 → top-k。
 
@@ -28,14 +33,15 @@ def search_docs(query: str, top_k: int = 5, strategy: str = "hybrid") -> list:
     if strategy not in {"vector", "hybrid", "enhanced"}:
         raise ValueError(f"Unsupported retrieval strategy: {strategy}")
 
-    cache_key = f"retrieval:{strategy}:{query}:{top_k}"
+    rerank_key = "default" if enable_rerank is None else str(enable_rerank).lower()
+    cache_key = f"retrieval:{strategy}:{rerank_key}:{query}:{top_k}"
     cached = cache_get(cache_key)
     if cached is not None:
         print(f"[Cache] 命中: {cache_key}")
         return cached
 
     if strategy == "enhanced":
-        final_docs = hybrid_search(query, top_k=top_k)
+        final_docs = hybrid_search(query, top_k=top_k, enable_rerank=enable_rerank)
         cache_set(cache_key, final_docs)
         return final_docs
     if strategy == "vector":
@@ -69,9 +75,19 @@ def search_docs(query: str, top_k: int = 5, strategy: str = "hybrid") -> list:
     return final_docs
 
 
-def retrieve_debug(question: str, top_k: int = 5) -> list:
+def retrieve_debug(
+    question: str,
+    top_k: int = 5,
+    retrieval_strategy: str = "hybrid",
+    enable_rerank: bool | None = None,
+) -> list:
     """
     调试用：只做检索，不做生成。
     返回检索到的文档块，供排查召回问题使用。
     """
-    return search_docs(question, top_k=top_k)
+    return search_docs(
+        question,
+        top_k=top_k,
+        strategy=retrieval_strategy,
+        enable_rerank=enable_rerank,
+    )

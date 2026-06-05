@@ -1,9 +1,12 @@
 import json
+import time
 from app.agent.react_state import ReActState
-from app.agent.tools import REFUSAL_ANSWER, document_source, get_tool_by_name
+from app.agent.tools import REFUSAL_ANSWER, GenerateAnswerTool, document_source, get_tool_by_name
+from app.core.config import AGENT_MAX_LLM_CALLS, AGENT_TIMEOUT_SECONDS
 from app.core.llm_client import get_chat_llm, get_llm_call_count, reset_llm_call_count
 from app.core.memory import get_history, build_history_summary, add_turn
 from app.core.logger import log_agent_trace, log_retry, log_circuit_breaker
+from app.services.retriever import search_docs
 
 
 # ============== LLM 决策相关 ==============
@@ -178,10 +181,16 @@ def execute_tool(action_name: str, action_args: dict, state: ReActState) -> str:
 
     tool_args = dict(action_args)
     if action_name == "search_docs":
+        requested_top_k = action_args.get("top_k", 5)
+        try:
+            requested_top_k = int(requested_top_k)
+        except (TypeError, ValueError):
+            requested_top_k = 5
         tool_args = {
             "query": action_args.get("query", state.query),
-            "top_k": action_args.get("top_k", 3),
+            "top_k": min(max(requested_top_k, 5), 8),
             "strategy": state.retrieval_strategy,
+            "enable_rerank": state.enable_rerank,
         }
     elif action_name == "rewrite_query":
         tool_args = {"original_query": action_args.get("original_query", state.query)}
@@ -290,14 +299,25 @@ def deduplicate_context(context: list) -> list:
 
 def should_finish(state: ReActState) -> bool:
     """判断任务是否应该结束——含三层保护"""
+    elapsed = time.perf_counter() - state.started_at if state.started_at else 0.0
+    llm_budget_hit = get_llm_call_count() >= max(state.max_llm_calls - 1, 1)
+    timeout_hit = elapsed >= state.timeout_seconds
+
     # 保护1：检索次数耗尽，或某轮没有带来新证据。
     exhausted = state.retrieval_attempts >= state.max_retrieval_attempts
     stalled = state.no_progress_attempts >= 1 and state.retrieval_attempts > 1
     too_many_steps = len(state.history) >= state.max_steps
-    if (exhausted or stalled or too_many_steps) and not state.done:
+    if (exhausted or stalled or too_many_steps or llm_budget_hit or timeout_hit) and not state.done:
         if state.context:
             observation = execute_tool("generate_answer", {}, state)
-            reason = "检索无新增证据" if stalled else "流程约束触发"
+            if timeout_hit:
+                reason = f"超时预算触发({state.timeout_seconds:.0f}s)"
+            elif llm_budget_hit:
+                reason = f"LLM 调用预算触发({state.max_llm_calls})"
+            elif stalled:
+                reason = "检索无新增证据"
+            else:
+                reason = "流程约束触发"
             state.history.append({
                 "step": len(state.history) + 1,
                 "thought": f"【系统收敛】{reason}，仅基于现有证据生成或拒答。",
@@ -335,7 +355,78 @@ def _build_result(state: ReActState) -> dict:
         "abstained": state.abstained,
         "context": state.context,
         "llm_calls": get_llm_call_count(),
+        "routed_to": state.routed_to,
     }
+
+
+def _is_simple_question(question: str) -> bool:
+    """低成本路由：定义/列举类短问题直接走 Hybrid RAG。"""
+    simple_markers = [
+        "是什么",
+        "什么是",
+        "有哪些",
+        "列举",
+        "英文全称",
+        "作用是什么",
+        "用途",
+    ]
+    complex_markers = [
+        "比较",
+        "区别",
+        "为什么",
+        "如何",
+        "流程",
+        "多跳",
+        "跨段",
+        "综合",
+        "优化",
+        "组合",
+        "因素",
+        "分别",
+        "策略",
+        "场景",
+    ]
+    return (
+        len(question) <= 32
+        and any(marker in question for marker in simple_markers)
+        and not any(marker in question for marker in complex_markers)
+    )
+
+
+def _run_hybrid_route(question: str, session_id: str, enable_rerank: bool | None) -> dict:
+    """简单问题绕过 ReAct 决策和 enhanced 检索，降低 Agent 成本。"""
+    docs = search_docs(
+        question,
+        top_k=5,
+        strategy="hybrid",
+        enable_rerank=enable_rerank,
+    )
+    answer = GenerateAnswerTool().execute(question, docs)
+    if session_id:
+        add_turn(session_id, question, answer["answer"])
+    result = {
+        "answer": answer["answer"],
+        "history": [{
+            "step": 1,
+            "thought": "【Query Router】简单问题降级到 Hybrid RAG，跳过 ReAct 决策和 enhanced rerank。",
+            "action": "route_to_hybrid",
+            "action_args": {"strategy": "hybrid"},
+            "observation": f"Hybrid RAG 返回 {len(docs)} 个 chunk 并生成答案。",
+            "query": question,
+            "retrieved_chunk_ids": [doc.metadata.get("chunk_id", "unknown") for doc in docs],
+            "new_chunk_ids": [doc.metadata.get("chunk_id", "unknown") for doc in docs],
+        }],
+        "retrieval_attempts": 1,
+        "final_query": question,
+        "sources": answer.get("sources", []),
+        "citations": answer.get("citations", []),
+        "abstained": answer.get("abstained", False),
+        "context": docs,
+        "llm_calls": get_llm_call_count(),
+        "routed_to": "hybrid_rag",
+    }
+    log_agent_trace(question, result)
+    return result
 
 
 def _resolve_references(question: str, chat_history: str) -> str:
@@ -377,6 +468,9 @@ def run_react_loop(
     question: str,
     session_id: str = "",
     retrieval_strategy: str = "enhanced",
+    enable_rerank: bool | None = None,
+    max_llm_calls: int = AGENT_MAX_LLM_CALLS,
+    timeout_seconds: float = AGENT_TIMEOUT_SECONDS,
 ) -> dict:
     """
     运行 ReAct Loop（带记忆），返回最终结果。
@@ -402,6 +496,9 @@ def run_react_loop(
     if chat_history and session_id:
         question = _resolve_references(question, chat_history)
 
+    if retrieval_strategy == "enhanced" and _is_simple_question(question):
+        return _run_hybrid_route(question, session_id, enable_rerank)
+
     # 重置 RewriteQueryTool 的状态（避免跨请求污染）
     rewrite_tool = get_tool_by_name("rewrite_query")
     if rewrite_tool:
@@ -409,11 +506,17 @@ def run_react_loop(
 
     # 初始化 State
     state = ReActState()
-    state.reset(question, retrieval_strategy=retrieval_strategy)
+    state.reset(
+        question,
+        retrieval_strategy=retrieval_strategy,
+        enable_rerank=enable_rerank,
+        max_llm_calls=max_llm_calls,
+        timeout_seconds=timeout_seconds,
+    )
 
     # 第一次检索：固定用 search_docs（首次必须先有检索结果，LLM 才能决策）
     first_action_name = "search_docs"
-    first_action_args = {"query": state.query, "top_k": 3}
+    first_action_args = {"query": state.query, "top_k": 5}
     first_observation = execute_tool(first_action_name, first_action_args, state)
 
     state.history.append({

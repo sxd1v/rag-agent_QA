@@ -9,6 +9,9 @@ class AskRequest(BaseModel):
     top_k: int = Field(default=5, ge=1, le=20)
     session_id: str = ""  # 非空时启用多轮记忆
     retrieval_strategy: Optional[Literal["vector", "hybrid", "enhanced"]] = None
+    enable_rerank: Optional[bool] = None
+    max_llm_calls: Optional[int] = Field(default=None, ge=1, le=20)
+    timeout_seconds: Optional[float] = Field(default=None, ge=1, le=600)
 
 
 class SourceItem(BaseModel):

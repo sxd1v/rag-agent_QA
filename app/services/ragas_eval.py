@@ -191,7 +191,8 @@ def evaluate_agent_behavior(
     }
     citations = result.get("citations", [])
     actions = [step.get("action") for step in history]
-    valid_actions = {"search_docs", "rewrite_query", "generate_answer"}
+    valid_actions = {"search_docs", "rewrite_query", "generate_answer", "route_to_hybrid"}
+    routed_to_hybrid = result.get("routed_to") == "hybrid_rag"
     metrics = {
         "action_count": len(history),
         "search_count": len(search_steps),
@@ -203,11 +204,17 @@ def evaluate_agent_behavior(
         "citation_count": len(citations),
         "abstained": result.get("abstained", False),
         "llm_calls": result.get("llm_calls", 0),
+        "routed_to": result.get("routed_to"),
         "valid_action_sequence": (
             bool(actions)
-            and actions[0] == "search_docs"
             and all(action in valid_actions for action in actions)
-            and (result.get("abstained", False) or "generate_answer" in actions)
+            and (
+                (routed_to_hybrid and actions[0] == "route_to_hybrid")
+                or (
+                    actions[0] == "search_docs"
+                    and (result.get("abstained", False) or "generate_answer" in actions)
+                )
+            )
         ),
     }
     if expected_answerable is not None:

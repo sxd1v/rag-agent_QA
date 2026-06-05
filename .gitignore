@@ -4,3 +4,4 @@ __pycache__/
 .ruff_cache/
 data/chroma_db/
 data/bm25_index.pkl
+data/eval_report_*.json

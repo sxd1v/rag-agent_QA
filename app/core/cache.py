@@ -7,6 +7,7 @@
 
 import json
 import pickle
+from contextvars import ContextVar
 
 # 尝试连接 Redis，失败不报错
 _redis_client = None
@@ -20,22 +21,50 @@ except Exception:
 
 # 内存缓存兜底
 _memory_cache: dict = {}
+_cache_stats = ContextVar("cache_stats", default=None)
+
+
+def reset_stats():
+    """重置当前请求/评估任务的缓存统计。"""
+    _cache_stats.set({"gets": 0, "hits": 0, "sets": 0})
+
+
+def get_stats() -> dict:
+    """返回当前上下文的缓存统计和命中率。"""
+    stats = _cache_stats.get() or {"gets": 0, "hits": 0, "sets": 0}
+    gets = stats["gets"]
+    return {
+        **stats,
+        "hit_rate": round(stats["hits"] / gets, 4) if gets else 0.0,
+    }
+
+
+def _record_stat(field: str):
+    stats = _cache_stats.get()
+    if stats is not None:
+        stats[field] += 1
 
 
 def get(key: str):
     """读取缓存，Redis 优先"""
+    _record_stat("gets")
     if _redis_client:
         try:
             data = _redis_client.get(key)
             if data:
+                _record_stat("hits")
                 return pickle.loads(data)
         except Exception:
             pass  # Redis 异常，降级到内存
-    return _memory_cache.get(key)
+    value = _memory_cache.get(key)
+    if value is not None:
+        _record_stat("hits")
+    return value
 
 
 def set(key: str, value, ttl: int = 3600):
     """写入缓存，Redis 优先。ttl 单位秒（Redis 专用）"""
+    _record_stat("sets")
     if _redis_client:
         try:
             _redis_client.setex(key, ttl, pickle.dumps(value))

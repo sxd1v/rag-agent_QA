@@ -114,6 +114,15 @@ query → 向量检索 top-10（语义）──┐
 
 `/ask` 请求可传 `retrieval_strategy: "vector" | "hybrid" | "enhanced"`；`/agent_ask` 默认使用 `enhanced`。Agent 响应包含 `sources`、`citations`、`abstained`、`history[].retrieved_chunk_ids` 与 `trace_metrics`。
 
+成本控制相关参数：
+
+| 参数 | 默认值 | 说明 |
+|---|---:|---|
+| `AGENT_MAX_LLM_CALLS` | `6` | Agent 到达预算前会收敛到生成/拒答，避免无限工具调用 |
+| `AGENT_TIMEOUT_SECONDS` | `120` | 单次 Agent 请求软超时，超时后基于已有证据生成/拒答 |
+| `ENABLE_RERANK` | `true` | enhanced 检索是否启用 LLM rerank；请求级可用 `enable_rerank` 覆盖 |
+| Query Router | 开启 | 定义/列举类短问题降级到 Hybrid RAG，跳过 ReAct 决策和 enhanced rerank |
+
 ---
 
 ## 快速启动
@@ -125,10 +134,26 @@ pip install -r requirements.txt
 
 配置 `.env`：
 ```env
-SILICONFLOW_API_KEY=your_key
-MINIMAX_API_KEY=your_key
-EMBEDDING_PROVIDER=minimax
+# Chat：任意 OpenAI-compatible 服务
+CHAT_PROVIDER=openai-compatible
+CHAT_API_KEY=your_chat_key
+CHAT_BASE_URL=https://your-chat-provider/v1
+CHAT_MODEL=your-chat-model
+
+# Embedding：minimax / openai-compatible / hash
+EMBEDDING_PROVIDER=hash
+EMBEDDING_MODEL=hash-local
+KNOWLEDGE_COLLECTION_NAME=knowledge_hash
+MEMORY_COLLECTION_NAME=memory_hash
 ```
+
+如果切换了 `EMBEDDING_PROVIDER` 或 embedding 模型，不要复用旧 Chroma collection；请更换 `KNOWLEDGE_COLLECTION_NAME` / `MEMORY_COLLECTION_NAME` 或 `CHROMA_PERSIST_DIR` 后重新导入文档：
+
+```bash
+python ingest.py data/test_knowledge.md
+```
+
+`hash` embedding 是本地兜底实现，适合余额不足时做流程验证；真实效果评估仍建议使用生产级 embedding 服务。
 
 ```bash
 # 启动服务
@@ -173,9 +198,13 @@ python test_hybrid_search.py    # 混合检索对比实验
 python -m unittest discover -s tests -v  # 不调用外部 API 的回归测试
 python eval_batch.py             # vector / hybrid / ReAct 三组批量对比
 python eval_batch.py --cold-cache # 清除各 pipeline 间缓存的受控对比
+python eval_batch.py --disable-rerank # 关闭 enhanced rerank 做成本对照
+python eval_batch.py --disable-rerank --report-path data/eval_report_disable_rerank.json
 ```
 
-批量评估集包含 30 个定义、流程、对比、跨段信息和无法回答问题；报告输出 Faithfulness、Answer Relevancy、Context Precision、无法回答准确率、响应耗时、LLM 调用次数与失败率。Agent 指标包含重复/无新增检索和动作序列合规度；要判断动作在语义上是否最优，仍需补人工标注。需要完整 Context Recall 时，请在 `/evaluate` 提供人工标注的 `ground_truth_chunk_ids`。
+批量评估集包含 90 个问题，覆盖定义、流程、对比、跨段、多跳、无法回答六类；每条可回答问题均标注 `ground_truth_chunk_ids`，因此报告能输出 Context Recall，而不是只看 Context Precision。报告字段包括 Faithfulness、Answer Relevancy、Context Precision、Context Recall、无法回答准确率、响应耗时、LLM 调用次数、cache hit rate、失败率与路由结果。Agent 指标包含重复/无新增检索和动作序列合规度；要判断动作在语义上是否最优，仍需补人工动作标注。
+
+`eval_batch.py` 在新建报告前会做 embedding 与 chat API preflight；如果遇到余额不足、鉴权失败等外部服务不可用错误，会快速中止，避免生成大批无效 `ERROR` 行。需要保留多组实验时使用 `--report-path` 写入独立报告；`data/eval_report_*.json` 为本地实验产物，不纳入版本管理。
 
 ### 实测结果
 
@@ -188,6 +217,10 @@ python eval_batch.py --cold-cache # 清除各 pipeline 间缓存的受控对比
 | ReAct Agent (enhanced) | 28/30 | 0.96 | 0.97 | 0.32 | 0.80 | 411.8 s | 5.73 |
 
 ReAct Agent 的 30 条结果中，引用校验与动作序列合规度均为 `30/30`，平均检索次数为 `1.97`；同时发生 `22` 次无新增检索，说明增强链路在当前小型知识库上的额外检索成本明显，不能仅凭通过率声称优于 Hybrid RAG。
+
+当前表格是 30 条旧评估集上的历史实测结果。评估集已扩展到 90 条并补齐 expected chunks；如需更新完整 270 条 pipeline 实测表，运行 `python eval_batch.py --cold-cache --workers 8`，或先用 `--disable-rerank` 生成低成本对照。
+
+2026-06-05 曾实际尝试运行 `python eval_batch.py --disable-rerank --workers 8 --report-path data/eval_report_disable_rerank.json`，但 MiniMax Embedding 与 SiliconFlow LLM 返回账户余额不足，270 行中 251 行为外部服务错误，因此该报告不作为有效评估结果引用。代码已补充 preflight 与 fatal error 快速中止，后续充值或切换可用模型后再重跑完整 90 条评估。
 
 ### Docker 验证
 
